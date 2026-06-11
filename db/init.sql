@@ -63,3 +63,71 @@ CREATE TABLE IF NOT EXISTS inspections (
     CONSTRAINT fk_insp_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
     CONSTRAINT fk_insp_user FOREIGN KEY (inspector_id) REFERENCES users (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hazards (
+    id              BIGINT        NOT NULL AUTO_INCREMENT,
+    project_id      BIGINT        NOT NULL,
+    inspection_id   BIGINT        NULL,
+    description     VARCHAR(2000) NOT NULL,
+    severity        VARCHAR(16)   NOT NULL DEFAULT 'NORMAL',
+    status          VARCHAR(24)   NOT NULL DEFAULT 'PENDING',
+    discoverer_id   BIGINT        NOT NULL,
+    discovered_at   DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    escalated       TINYINT(1)    NOT NULL DEFAULT 0,
+    created_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_hazard_project (project_id),
+    KEY idx_hazard_status (status),
+    KEY idx_hazard_severity (severity),
+    CONSTRAINT fk_hazard_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    CONSTRAINT fk_hazard_inspection FOREIGN KEY (inspection_id) REFERENCES inspections (id) ON DELETE SET NULL,
+    CONSTRAINT fk_hazard_discoverer FOREIGN KEY (discoverer_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS rectifications (
+    id              BIGINT        NOT NULL AUTO_INCREMENT,
+    hazard_id       BIGINT        NOT NULL,
+    assignee_id     BIGINT        NOT NULL,
+    deadline        DATE          NOT NULL,
+    description     VARCHAR(2000) NOT NULL DEFAULT '',
+    status          VARCHAR(16)   NOT NULL DEFAULT 'ASSIGNED',
+    rectify_action  VARCHAR(2000) NOT NULL DEFAULT '',
+    rectify_remark  VARCHAR(1000) NOT NULL DEFAULT '',
+    rectified_at    DATETIME(3)   NULL,
+    created_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_rect_hazard (hazard_id),
+    KEY idx_rect_assignee (assignee_id),
+    KEY idx_rect_status (status),
+    CONSTRAINT fk_rect_hazard FOREIGN KEY (hazard_id) REFERENCES hazards (id) ON DELETE CASCADE,
+    CONSTRAINT fk_rect_assignee FOREIGN KEY (assignee_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS reinspections (
+    id                 BIGINT        NOT NULL AUTO_INCREMENT,
+    rectification_id   BIGINT        NOT NULL,
+    inspector_id       BIGINT        NOT NULL,
+    result             VARCHAR(16)   NOT NULL DEFAULT 'PASS',
+    remark             VARCHAR(1000) NOT NULL DEFAULT '',
+    reinspected_at     DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_at         DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_reinspect_rect (rectification_id),
+    CONSTRAINT fk_reinspect_rect FOREIGN KEY (rectification_id) REFERENCES rectifications (id) ON DELETE CASCADE,
+    CONSTRAINT fk_reinspect_user FOREIGN KEY (inspector_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hazard_logs (
+    id           BIGINT        NOT NULL AUTO_INCREMENT,
+    hazard_id    BIGINT        NOT NULL,
+    action       VARCHAR(32)   NOT NULL,
+    operator_id  BIGINT        NOT NULL,
+    detail       VARCHAR(1000) NOT NULL DEFAULT '',
+    created_at   DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_log_hazard (hazard_id),
+    CONSTRAINT fk_log_hazard FOREIGN KEY (hazard_id) REFERENCES hazards (id) ON DELETE CASCADE,
+    CONSTRAINT fk_log_operator FOREIGN KEY (operator_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
