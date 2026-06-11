@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS rectifications (
     rectify_action  VARCHAR(2000) NOT NULL DEFAULT '',
     rectify_remark  VARCHAR(1000) NOT NULL DEFAULT '',
     rectified_at    DATETIME(3)   NULL,
+    parent_id       BIGINT        NULL,
     created_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
@@ -107,7 +108,8 @@ CREATE TABLE IF NOT EXISTS rectifications (
     KEY idx_rect_assignee (assignee_id),
     KEY idx_rect_status (status),
     CONSTRAINT fk_rect_hazard FOREIGN KEY (hazard_id) REFERENCES hazards (id) ON DELETE CASCADE,
-    CONSTRAINT fk_rect_assignee FOREIGN KEY (assignee_id) REFERENCES users (id)
+    CONSTRAINT fk_rect_assignee FOREIGN KEY (assignee_id) REFERENCES users (id),
+    CONSTRAINT fk_rect_parent FOREIGN KEY (parent_id) REFERENCES rectifications (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 复查记录

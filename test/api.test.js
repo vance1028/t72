@@ -349,9 +349,15 @@ test('打回重改后之前的整改记录保留', async () => {
     .send({ result: 'FAIL', remark: '不通过' });
   assert.strictEqual(res.status, 200);
 
-  const rect = await request(app).get('/api/rectifications/2').set('Authorization', `Bearer ${token}`);
-  assert.strictEqual(rect.body.data.rectifyAction, '已更换全部滤毒组件并调试完成');
-  assert.strictEqual(rect.body.data.status, 'RECTIFYING');
+  const oldRect = await request(app).get('/api/rectifications/2').set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(oldRect.body.data.rectifyAction, '已更换全部滤毒组件并调试完成');
+  assert.strictEqual(oldRect.body.data.status, 'REJECTED');
+
+  const newRectId = res.body.data.rectification.id;
+  assert.notStrictEqual(newRectId, 2);
+  const newRect = await request(app).get(`/api/rectifications/${newRectId}`).set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(newRect.body.data.status, 'RECTIFYING');
+  assert.strictEqual(newRect.body.data.parentId, 2);
 });
 
 test('整改工单可按隐患和责任人筛选', async () => {
@@ -424,4 +430,176 @@ test('统计看板返回超期未整改清单', async () => {
   const res = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${token}`);
   assert.strictEqual(res.status, 200);
   assert.ok(Array.isArray(res.body.data.overdueList));
+});
+
+/* ---------- 自动升级机制 ---------- */
+
+test('查询统计看板时自动升级超期重大隐患', async () => {
+  const mgr = await tokenOf('manager', 'manager123');
+  const insp = await tokenOf('inspector', 'inspect123');
+
+  await request(app).post('/api/hazards')
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ projectId: 1, description: '测试自动升级的重大隐患', severity: 'CRITICAL' });
+
+  const list = await request(app).get('/api/hazards?status=PENDING').set('Authorization', `Bearer ${insp}`);
+  const h = list.body.data[0];
+  assert.strictEqual(h.escalated, false);
+
+  const pastDate = '2020-01-01';
+  await request(app).post(`/api/hazards/${h.id}/assign`)
+    .set('Authorization', `Bearer ${mgr}`)
+    .send({ assigneeId: 4, deadline: pastDate });
+
+  const before = await request(app).get(`/api/hazards/${h.id}`).set('Authorization', `Bearer ${insp}`);
+  assert.strictEqual(before.body.data.escalated, false);
+
+  const stats = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  assert.strictEqual(stats.status, 200);
+
+  const after = await request(app).get(`/api/hazards/${h.id}`).set('Authorization', `Bearer ${insp}`);
+  assert.strictEqual(after.body.data.escalated, true);
+});
+
+test('自动升级后写入流转日志', async () => {
+  const mgr = await tokenOf('manager', 'manager123');
+  const insp = await tokenOf('inspector', 'inspect123');
+
+  await request(app).post('/api/hazards')
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ projectId: 2, description: '测试自动升级日志', severity: 'CRITICAL' });
+
+  const list = await request(app).get('/api/hazards?status=PENDING').set('Authorization', `Bearer ${insp}`);
+  const h = list.body.data[0];
+
+  const pastDate = '2020-01-01';
+  await request(app).post(`/api/hazards/${h.id}/assign`)
+    .set('Authorization', `Bearer ${mgr}`)
+    .send({ assigneeId: 4, deadline: pastDate });
+
+  await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+
+  const logs = await request(app).get(`/api/hazards/${h.id}/logs`).set('Authorization', `Bearer ${insp}`);
+  assert.ok(logs.body.data.some((l) => l.action === 'ESCALATED'));
+  assert.ok(logs.body.data.some((l) => l.detail.includes('系统自动升级')));
+});
+
+test('超期清单包含当前期限和升级状态', async () => {
+  const token = await tokenOf('inspector', 'inspect123');
+  const res = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  if (res.body.data.overdueList.length > 0) {
+    const item = res.body.data.overdueList[0];
+    assert.ok('currentDeadline' in item);
+    assert.ok('escalated' in item);
+  }
+});
+
+test('已升级的隐患不会重复自动升级', async () => {
+  const insp = await tokenOf('inspector', 'inspect123');
+
+  const before = await request(app).get('/api/hazards/4').set('Authorization', `Bearer ${insp}`);
+  assert.strictEqual(before.body.data.escalated, true);
+
+  const stats1 = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const count1 = stats1.body.data.autoEscalatedCount;
+
+  const stats2 = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const count2 = stats2.body.data.autoEscalatedCount;
+
+  assert.strictEqual(count2, 0);
+});
+
+/* ---------- 及时率计算修复 ---------- */
+
+test('打回重改后超期销号不应算按期', async () => {
+  const mgr = await tokenOf('manager', 'manager123');
+  const insp = await tokenOf('inspector', 'inspect123');
+
+  const statsBefore = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const timelyBefore = statsBefore.body.data.timelyRate;
+
+  await request(app).post('/api/hazards')
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ projectId: 3, description: '测试及时率-打回超期', severity: 'NORMAL' });
+
+  const list = await request(app).get('/api/hazards?status=PENDING').set('Authorization', `Bearer ${insp}`);
+  const h = list.body.data[0];
+
+  const pastDate = '2020-01-01';
+  await request(app).post(`/api/hazards/${h.id}/assign`)
+    .set('Authorization', `Bearer ${mgr}`)
+    .send({ assigneeId: 4, deadline: pastDate });
+
+  const rects = await request(app).get(`/api/hazards/${h.id}/rectifications`).set('Authorization', `Bearer ${insp}`);
+  const rectId = rects.body.data[0].id;
+
+  await request(app).post(`/api/rectifications/${rectId}/report`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ rectifyAction: '假装已整改' });
+
+  const failRes = await request(app).post(`/api/rectifications/${rectId}/reinspect`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ result: 'FAIL', remark: '不合格，打回', newDeadline: '2030-12-31' });
+
+  const newRectId = failRes.body.data.rectification.id;
+
+  await request(app).post(`/api/rectifications/${newRectId}/report`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ rectifyAction: '第二次整改完成' });
+
+  await request(app).post(`/api/rectifications/${newRectId}/reinspect`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ result: 'PASS', remark: '整改到位' });
+
+  const statsAfter = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const timelyAfter = statsAfter.body.data.timelyRate;
+
+  assert.strictEqual(timelyAfter.totalClosed, timelyBefore.totalClosed + 1);
+  assert.strictEqual(timelyAfter.onTime, timelyBefore.onTime);
+});
+
+test('按期销号的隐患应算按期', async () => {
+  const mgr = await tokenOf('manager', 'manager123');
+  const insp = await tokenOf('inspector', 'inspect123');
+
+  const statsBefore = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const timelyBefore = statsBefore.body.data.timelyRate;
+
+  await request(app).post('/api/hazards')
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ projectId: 4, description: '测试及时率-按期销号', severity: 'NORMAL' });
+
+  const list = await request(app).get('/api/hazards?status=PENDING').set('Authorization', `Bearer ${insp}`);
+  const h = list.body.data[0];
+
+  const futureDate = '2099-12-31';
+  await request(app).post(`/api/hazards/${h.id}/assign`)
+    .set('Authorization', `Bearer ${mgr}`)
+    .send({ assigneeId: 4, deadline: futureDate });
+
+  const rects = await request(app).get(`/api/hazards/${h.id}/rectifications`).set('Authorization', `Bearer ${insp}`);
+  const rectId = rects.body.data[0].id;
+
+  await request(app).post(`/api/rectifications/${rectId}/report`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ rectifyAction: '已整改' });
+
+  await request(app).post(`/api/rectifications/${rectId}/reinspect`)
+    .set('Authorization', `Bearer ${insp}`)
+    .send({ result: 'PASS', remark: '通过' });
+
+  const statsAfter = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${insp}`);
+  const timelyAfter = statsAfter.body.data.timelyRate;
+
+  assert.strictEqual(timelyAfter.totalClosed, timelyBefore.totalClosed + 1);
+  assert.strictEqual(timelyAfter.onTime, timelyBefore.onTime + 1);
+});
+
+test('统计看板返回本次自动升级数量', async () => {
+  const token = await tokenOf('inspector', 'inspect123');
+  const res = await request(app).get('/api/stats/hazards').set('Authorization', `Bearer ${token}`);
+  assert.strictEqual(res.status, 200);
+  assert.ok('autoEscalatedCount' in res.body.data);
+  assert.ok(typeof res.body.data.autoEscalatedCount === 'number');
 });

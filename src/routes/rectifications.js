@@ -98,21 +98,26 @@ router.post('/:id/reinspect', requireRole('ADMIN', 'MANAGER', 'INSPECTOR'), wrap
       hazardId: rect.hazardId, action: 'REINSPECTED', operatorId: req.user.id,
       detail: '复查通过，销号关闭',
     });
+    res.json({ data: { reinspection: ri, rectification: await store.getRectification(id), hazard: await store.getHazard(rect.hazardId) } });
   } else {
     const bDeadline = b.newDeadline;
-    const patch = { status: 'RECTIFYING' };
-    if (bDeadline && isValidDate(bDeadline)) {
-      patch.deadline = bDeadline;
-    }
-    await store.updateRectification(id, patch);
+    const newDeadline = (bDeadline && isValidDate(bDeadline)) ? bDeadline : rect.deadline;
+    await store.updateRectification(id, { status: 'REJECTED' });
+    const newRect = await store.createRectification({
+      hazardId: rect.hazardId,
+      assigneeId: rect.assigneeId,
+      deadline: newDeadline,
+      description: typeof b.description === 'string' ? b.description : rect.description,
+      status: 'RECTIFYING',
+      parentId: id,
+    });
     await store.updateHazard(rect.hazardId, { status: 'RECTIFYING' });
     await store.createHazardLog({
       hazardId: rect.hazardId, action: 'REJECTED', operatorId: req.user.id,
-      detail: `复查不通过，打回重改${bDeadline ? '，新期限' + bDeadline : ''}`,
+      detail: `复查不通过，打回重开新工单，新期限${newDeadline}`,
     });
+    res.json({ data: { reinspection: ri, rectification: newRect, hazard: await store.getHazard(rect.hazardId) } });
   }
-
-  res.json({ data: { reinspection: ri, rectification: await store.getRectification(id), hazard: await store.getHazard(rect.hazardId) } });
 }));
 
 router.get('/:id/reinspections', wrap(async (req, res) => {

@@ -105,6 +105,7 @@ function mapRectification(r) {
     rectifyAction: r.rectify_action,
     rectifyRemark: r.rectify_remark,
     rectifiedAt: r.rectified_at,
+    parentId: r.parent_id,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -435,9 +436,9 @@ async function getActiveRectificationByHazard(hazardId) {
 
 async function createRectification(rec) {
   const [r] = await pool.query(
-    `INSERT INTO rectifications (hazard_id, assignee_id, deadline, description, status)
-     VALUES (?, ?, ?, ?, ?)`,
-    [rec.hazardId, rec.assigneeId, rec.deadline, rec.description || '', rec.status || 'ASSIGNED'],
+    `INSERT INTO rectifications (hazard_id, assignee_id, deadline, description, status, parent_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [rec.hazardId, rec.assigneeId, rec.deadline, rec.description || '', rec.status || 'ASSIGNED', rec.parentId || null],
   );
   const [rows] = await pool.query('SELECT * FROM rectifications WHERE id = ?', [r.insertId]);
   return mapRectification(rows[0]);
@@ -504,7 +505,44 @@ async function createHazardLog(log) {
 
 /* ----------------------------- 统计看板 ----------------------------- */
 
+async function autoEscalateOverdueCritical() {
+  const [toEscalate] = await pool.query(
+    `SELECT DISTINCT h.id, h.project_id
+     FROM hazards h
+     JOIN rectifications r ON r.hazard_id = h.id
+     WHERE h.severity = 'CRITICAL'
+       AND h.status != 'CLOSED'
+       AND h.escalated = 0
+       AND r.deadline < CURDATE()
+       AND r.status IN ('ASSIGNED', 'RECTIFYING')`,
+  );
+
+  if (toEscalate.length === 0) return 0;
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const h of toEscalate) {
+      await conn.query('UPDATE hazards SET escalated = 1, updated_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [h.id]);
+      await conn.query(
+        `INSERT INTO hazard_logs (hazard_id, action, operator_id, detail)
+         VALUES (?, 'ESCALATED', ?, ?)`,
+        [h.id, 2, '系统自动升级：重大隐患超期未整改，已通知工程主管'],
+      );
+    }
+    await conn.commit();
+    return toEscalate.length;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
 async function getHazardStats() {
+  const autoEscalatedCount = await autoEscalateOverdueCritical();
+
   const [unclosed] = await pool.query(
     `SELECT h.project_id, p.name AS project_name, COUNT(*) AS unclosed_count
      FROM hazards h
@@ -521,36 +559,53 @@ async function getHazardStats() {
   const [timelyStats] = await pool.query(
     `SELECT
        COUNT(*) AS total_closed,
-       SUM(CASE WHEN r.rectified_at <= CONCAT(r.deadline, ' 23:59:59') THEN 1 ELSE 0 END) AS on_time
-     FROM rectifications r
-     WHERE r.status = 'CLOSED'`,
+       SUM(CASE
+         WHEN h.final_closed_at <= CONCAT(first_r.deadline, ' 23:59:59')
+         THEN 1 ELSE 0
+       END) AS on_time
+     FROM (
+       SELECT
+         h2.id,
+         h2.updated_at AS final_closed_at
+       FROM hazards h2
+       WHERE h2.status = 'CLOSED'
+     ) h
+     JOIN (
+       SELECT hazard_id, MIN(deadline) AS deadline
+       FROM rectifications
+       GROUP BY hazard_id
+     ) first_r ON first_r.hazard_id = h.id`,
   );
 
   const [overdue] = await pool.query(
-    `SELECT h.*, p.name AS project_name
+    `SELECT h.*, p.name AS project_name, r.deadline AS current_deadline
      FROM hazards h
      JOIN projects p ON p.id = h.project_id
      JOIN rectifications r ON r.hazard_id = h.id
      WHERE h.status IN ('RECTIFYING', 'PENDING_REINSPECTION')
        AND r.deadline < CURDATE()
        AND r.status IN ('ASSIGNED', 'RECTIFYING')
+     GROUP BY h.id, p.name, r.deadline
      ORDER BY h.severity = 'CRITICAL' DESC, h.severity = 'MAJOR' DESC, r.deadline ASC`,
   );
 
   return {
+    autoEscalatedCount,
     unclosedByProject: unclosed.map((r) => ({
-      projectId: r.project_id, projectName: r.project_name, unclosedCount: r.unclosed_count,
+      projectId: r.project_id, projectName: r.project_name, unclosedCount: Number(r.unclosed_count),
     })),
-    severityDistribution: severityDist.map((r) => ({ severity: r.severity, count: r.count })),
+    severityDistribution: severityDist.map((r) => ({ severity: r.severity, count: Number(r.count) })),
     timelyRate: {
-      totalClosed: timelyStats[0].total_closed || 0,
-      onTime: timelyStats[0].on_time || 0,
-      rate: timelyStats[0].total_closed > 0
-        ? Number(((timelyStats[0].on_time / timelyStats[0].total_closed) * 100).toFixed(1))
+      totalClosed: Number(timelyStats[0].total_closed) || 0,
+      onTime: Number(timelyStats[0].on_time) || 0,
+      rate: Number(timelyStats[0].total_closed) > 0
+        ? Number(((Number(timelyStats[0].on_time) / Number(timelyStats[0].total_closed)) * 100).toFixed(1))
         : 0,
     },
     overdueList: overdue.map((r) => ({
-      ...mapHazard(r), projectName: r.project_name,
+      ...mapHazard(r),
+      projectName: r.project_name,
+      currentDeadline: r.current_deadline,
     })),
   };
 }
@@ -565,5 +620,5 @@ module.exports = {
   listRectifications, getRectification, getActiveRectificationByHazard, createRectification, updateRectification,
   listReinspections, createReinspection,
   listHazardLogs, createHazardLog,
-  getHazardStats,
+  getHazardStats, autoEscalateOverdueCritical,
 };
